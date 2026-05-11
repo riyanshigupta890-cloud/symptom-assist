@@ -659,9 +659,9 @@
         addMessage("bot", "Let's start fresh. What symptoms are you experiencing?");
       }
 
-      function generateClinicalPdf(sessionData) {
+      function generateClinicalPdf(sessionData, downloadButton) {
         const template = document.getElementById("clinical-report-template");
-        if (!template || !sessionData) return;
+        if (!template || !sessionData || !downloadButton) return;
 
         template.querySelector("#pdf-gen-date").textContent = new Date().toUTCString();
         template.querySelector("#pdf-session-id").textContent = sessionId ? `${sessionId.substring(0, 8)}...` : "new-session";
@@ -719,9 +719,9 @@
         const safeSessionId = (sessionId || "new-session").substring(0, 5);
         const outputFilename = `SymptomAssist_Clinical_Summary_${safeSessionId}.pdf`;
 
-        const originalText = downloadPdfBtn.textContent;
-        downloadPdfBtn.textContent = "Generating...";
-        downloadPdfBtn.disabled = true;
+        const originalText = downloadButton.textContent;
+        downloadButton.textContent = "Generating...";
+        downloadButton.disabled = true;
 
         const opt = {
           margin: 10,
@@ -743,8 +743,8 @@
           .from(template)
           .save()
           .finally(() => {
-            downloadPdfBtn.textContent = originalText;
-            downloadPdfBtn.disabled = false;
+            downloadButton.textContent = originalText;
+            downloadButton.disabled = false;
           });
       }
 
@@ -1094,7 +1094,7 @@
             alert("Summary data not available. Please wait for the summary to load.");
             return;
           }
-          generateClinicalPdf(lastSummaryData);
+          generateClinicalPdf(lastSummaryData, downloadPdfBtn);
         });
 
         // ============================================================
