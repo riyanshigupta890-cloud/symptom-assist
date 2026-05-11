@@ -153,7 +153,6 @@
           .style("font-family", "'Inter', 'Roboto', sans-serif");
 
         GRAPH.svg = svg;
-
         const defs = svg.append("defs");
         defs
           .append("marker")
@@ -756,48 +755,88 @@
             .map((s) => `<span class="tag tag-symptom">${s}</span>`)
             .join("");
         } else {
-          sympList.innerHTML =
-            '<div class="empty-state">None identified yet</div>';
+          sympList.innerHTML = '<div class="empty-state">None identified yet</div>';
         }
-
-        // Conditions
+ 
         const condList = document.getElementById("cond-list");
         if (data.top_conditions?.length > 0) {
           condList.innerHTML = data.top_conditions
-            .map((c) => {
+            .map((c, index) => {
               const pct = Math.round(c.score * 100);
+               
+              let confClass = "xai-conf-medium";
+              let confBarColor = "var(--primary-light)";
+              if (c.confidence === "High") { confClass = "xai-conf-high"; confBarColor = "#10b981"; }
+              if (c.confidence === "Low") { confClass = "xai-conf-low"; confBarColor = "#ef4444"; }
+              
+              const matchText = c.match_ratio ? `Match: ${c.match_ratio} symptoms` : "";
+ 
+              let contribHtml = "";
+              if (c.contribution && Object.keys(c.contribution).length > 0) {
+                contribHtml = `<div class="xai-contrib">
+                  <div class="xai-title">Symptom Contribution Weight</div>`;
+                for (const [symp, weight] of Object.entries(c.contribution)) {
+                  const wPct = Math.min(Math.round(weight * 100), 100);
+                  contribHtml += `
+                    <div class="xai-bar-row">
+                      <span class="xai-bar-label">${symp}</span>
+                      <div class="xai-bar-track"><div class="xai-bar-fill" style="width: ${wPct}%"></div></div>
+                      <span class="xai-bar-val">${weight.toFixed(2)}</span>
+                    </div>`;
+                }
+                contribHtml += `</div>`;
+              }
+
+              let checklistHtml = "";
+              if (index === 0 && (c.matched_symptoms || c.missing_symptoms)) {
+                checklistHtml = `
+                  <div class="xai-checklist">
+                    <div class="xai-title">Symptom Checklist</div>
+                    <ul class="xai-list">`;
+                (c.matched_symptoms || []).forEach(s => {
+                  checklistHtml += `<li class="xai-matched"><svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" fill="none" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg> ${s}</li>`;
+                });
+                (c.missing_symptoms || []).forEach(s => {
+                  checklistHtml += `<li class="xai-missing"><svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" fill="none" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg> ${s}</li>`;
+                });
+                checklistHtml += `</ul></div>`;
+              }
+
               return `
-          <div class="condition-item">
-            <div class="condition-header">
-              <span class="condition-name">${c.display}</span>
-              <span class="severity sev-${c.severity}">${c.severity}</span>
-            </div>
-            <div class="progress-track">
-              <div class="progress-fill" style="width: ${pct}%"></div>
-            </div>
-          </div>
-        `;
+                <div class="condition-item">
+                  <div class="condition-header">
+                    <span class="condition-name">${c.display}</span>
+                    <span class="severity sev-${c.severity}">${c.severity}</span>
+                  </div>
+                  
+                  <div class="xai-match-quality ${confClass}">
+                    <span>Confidence: <strong>${c.confidence || 'Medium'}</strong></span>
+                    <span>${matchText}</span>
+                  </div>
+
+                  <div class="progress-track" style="margin-top: 6px;">
+                    <div class="progress-fill" style="width: ${pct}%; background: ${confBarColor}"></div>
+                  </div>
+                  
+                  ${index === 0 ? checklistHtml : ''}
+                  ${contribHtml}
+                </div>
+              `;
             })
             .join("");
         } else {
-          condList.innerHTML =
-            '<div class="empty-state">Awaiting context...</div>';
+          condList.innerHTML = '<div class="empty-state">Awaiting context...</div>';
         }
-
-        // RAG
+ 
         const ragList = document.getElementById("rag-list");
         if (data.rag_sources?.length > 0) {
           ragList.innerHTML = data.rag_sources
-            .map(
-              (s) =>
-                `<div class="source-item"><div class="source-bullet"></div>${s}</div>`,
-            )
+            .map((s) => `<div class="source-item"><div class="source-bullet"></div>${s}</div>`)
             .join("");
         } else {
           ragList.innerHTML = '<div class="empty-state">No docs matched</div>';
         }
-
-        // Follow-ups
+ 
         const fuList = document.getElementById("fu-list");
         if (data.graph_followups?.length > 0) {
           fuList.innerHTML = data.graph_followups
@@ -806,31 +845,29 @@
         } else {
           fuList.innerHTML = '<div class="empty-state">None currently</div>';
         }
-
-        // BFS Traversal Path
+ 
         const travList = document.getElementById("trav-list");
         const path = data.traversal_path || [];
         if (path.length > 0) {
           const shown = path.slice(0, 12);
-          travList.innerHTML =
-            `<div class="traversal-header">Visited ${path.length} edges · showing first ${shown.length}</div>` +
-            shown
-              .map(
-                (step, i) => `
-          <div class="traversal-step" style="animation-delay:${i * 40}ms">
-            <span class="ts-from">${step.from}</span>
-            <span class="ts-arrow">→</span>
-            <span class="ts-to">${step.to}</span>
-            <span class="ts-weight">w=${step.weight}</span>
-          </div>`,
-              )
-              .join("");
+          travList.innerHTML = 
+            `<div class="traversal-header">Graph Journey (First ${shown.length} Steps)</div>` +
+            `<div class="xai-flowchart">` +
+            shown.map((step, i) => `
+              <div class="xai-flow-step" style="animation-delay:${i * 40}ms">
+                <div class="xai-flow-node">${step.from}</div>
+                <div class="xai-flow-arrow">
+                  <span class="xai-flow-weight">${step.weight}</span>
+                  <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="2"><line x1="12" y1="2" x2="12" y2="22"></line><polyline points="19 15 12 22 5 15"></polyline></svg>
+                </div>
+                ${i === shown.length - 1 ? `<div class="xai-flow-node xai-flow-target">${step.to}</div>` : ''}
+              </div>
+            `).join("") +
+            `</div>`;
         } else {
-          travList.innerHTML =
-            '<div class="empty-state">No traversal yet</div>';
+          travList.innerHTML = '<div class="empty-state">No traversal yet</div>';
         }
-
-        // Red Flags
+ 
         const rfCard = document.getElementById("card-redflags");
         const rfList = document.getElementById("rf-list");
         if (data.red_flags_detected?.length > 0) {
@@ -848,8 +885,10 @@
         if (!text || isLoading) return;
 
         inputEl.value = "";
-        sendBtn.disabled = true;
         isLoading = true;
+
+        sendBtn.disabled = true;
+        sendBtn.textContent = "Sending...";
 
         addMessage("user", text);
         history.push({ role: "user", content: text });
@@ -888,7 +927,10 @@
         }
 
         isLoading = false;
+
+        sendBtn.textContent = "Send";
         sendBtn.disabled = inputEl.value.trim() === "";
+
         inputEl.focus();
       }
 
@@ -1039,6 +1081,7 @@
         const copySummaryBtn = document.getElementById("copySummaryBtn");
         const downloadPdfBtn = document.getElementById("downloadPdfBtn");
         const printSummaryBtn = document.getElementById("printSummaryBtn");
+        const downloadPdfBtn = document.getElementById("downloadPdfBtn");
         const summaryTextArea = document.getElementById("summary-text-area");
         let lastSummaryData = null;
 
@@ -1060,6 +1103,7 @@
             lastSummaryData = data.data || null;
           } catch (err) {
             summaryTextArea.textContent = "Error loading summary. Please try again later.";
+            lastSummaryData = null;
             console.error(err);
           }
         });
@@ -1119,3 +1163,10 @@
           }
         });
       };
+
+        function sendChip(text) {
+          const input = document.getElementById('input');
+          input.value = text;
+          input.dispatchEvent(new Event('input'));
+          document.getElementById('send-btn').click();
+        }
