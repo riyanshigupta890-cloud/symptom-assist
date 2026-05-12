@@ -1,4 +1,4 @@
-﻿# SymptomAssist AI 🩺
+# SymptomAssist AI 🩺
 
 SymptomAssist AI is a neuro-symbolic medical assistant that combines:
 
