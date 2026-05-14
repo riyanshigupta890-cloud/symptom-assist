@@ -21,6 +21,7 @@ import uuid
 import pathlib
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
+from starlette.requests import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
@@ -30,6 +31,9 @@ from groq import AsyncGroq
 from dotenv import load_dotenv
 import logging
 import textwrap
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from .core.error_handler import APIErrorHandler, retry_with_backoff
 from .logging_config import setup_logging
@@ -91,10 +95,18 @@ def _purge_expired_sessions() -> None:
         del SESSION_STORE[sid]
 
 # ---------------------------------------------------------------------------
+# Rate Limiting
+# ---------------------------------------------------------------------------
+limiter = Limiter(key_func=get_remote_address)
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="SymptomAssist AI", version="2.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -461,18 +473,19 @@ def build_journey_edges(symptom_timeline: List[dict], candidates: List[dict]) ->
     return edges
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+@limiter.limit("5/minute")
+async def chat(request: Request, chat_request: ChatRequest):
     try:
-        if not request.messages:
+        if not chat_request.messages:
             raise HTTPException(status_code=400, detail="No messages provided")
 
         # --- Step 0: Session Management ---
         # Retrieve existing symptoms and session ID (or create new ones)
-        session_id, prior_symptoms = _get_or_create_session(request.session_id)
+        session_id, prior_symptoms = _get_or_create_session(chat_request.session_id)
 
         # Get the latest user message
         latest_user_msg = next(
-            (m.content for m in reversed(request.messages) if m.role == "user"),
+            (m.content for m in reversed(chat_request.messages) if m.role == "user"),
             ""
         )
 
@@ -492,8 +505,8 @@ async def chat(request: ChatRequest):
         else:
             all_symptoms_data = list(prior_symptoms)
 
-        if request.temporal_context:
-            for ctx in request.temporal_context:
+        if chat_request.temporal_context:
+            for ctx in chat_request.temporal_context:
                 ctx_name = ctx.name.lower().strip()
                 found = False
                 for sym in all_symptoms_data:
@@ -561,7 +574,7 @@ async def chat(request: ChatRequest):
         # --- Step 6: Call Groq with full context ---
         # Map roles to Groq roles ("user" -> "user", "model" -> "assistant")
         messages = [{"role": "system", "content": system_prompt}]
-        for m in request.messages:
+        for m in chat_request.messages:
             role = "user" if m.role == "user" else "assistant"
             messages.append({"role": role, "content": m.content})
 
@@ -690,7 +703,8 @@ async def get_summary_pdf(session_id: str):
 # ---------------------------------------------------------------------------
 
 @app.post("/debug/analyse")
-async def debug_analyse(body: dict):
+@limiter.limit("5/minute")
+async def debug_analyse(request: Request, body: dict):
     text = body.get("text", "")
     extraction = NLP.extract(text)
     candidates = traverse_graph(GRAPH, extraction.symptoms)
@@ -719,7 +733,8 @@ async def debug_analyse(body: dict):
 
 
 @app.post("/debug/traversal")
-async def debug_traversal(body: dict):
+@limiter.limit("5/minute")
+async def debug_traversal(request: Request, body: dict):
     """
     Returns the full BFS traversal path for a given list of symptoms.
     Great for visualising how the graph inference works.
