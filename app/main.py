@@ -19,6 +19,7 @@ import os
 import json
 import uuid
 import pathlib
+import unicodedata
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -298,7 +299,11 @@ def build_clinical_summary_text(
 
 
 def _escape_pdf_text(text: str) -> str:
-    return text.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+    text = text.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+    text = text.replace('•', '-').replace('–', '-').replace('—', '-')
+    text = text.replace('“', '"').replace('”', '"').replace('’', "'").replace('‘', "'")
+    text = unicodedata.normalize('NFKD', text)
+    return ''.join(ch for ch in text if ord(ch) < 256)
 
 
 def _build_pdf_pages(lines: list[str], page_width: int = 595, page_height: int = 842, margin_left: int = 40, margin_top: int = 40, line_height: int = 14):
@@ -319,34 +324,41 @@ def _build_pdf_pages(lines: list[str], page_width: int = 595, page_height: int =
 
 
 def build_pdf_bytes(text: str) -> bytes:
+    page_width = 595
+    page_height = 842
+
     lines = []
     for raw_line in text.splitlines():
         wrapped = textwrap.wrap(raw_line, width=90) or [""]
         lines.extend(wrapped)
-    pages = _build_pdf_pages(lines)
+    pages = _build_pdf_pages(lines, page_width=page_width, page_height=page_height)
 
     objects = []
     def add_object(content: str) -> int:
         objects.append(content)
         return len(objects)
 
+    # Pre-calculate object IDs for stable references
     catalog_id = add_object("<< /Type /Catalog /Pages 2 0 R >>")
-    pages_id = add_object("<< /Type /Pages /Kids [3 0 R] /Count {} >>".format(len(pages)))
-    page_ids = []
-    content_ids = []
-    for page in pages:
-        content_id = add_object(f"<< /Length {len(page.encode('latin1'))} >>\nstream\n{page}\nendstream")
-        content_ids.append(content_id)
-    for content_id in content_ids:
-        page_id = add_object(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] /Contents {content_id} 0 R /Resources <</Font <</F1 5 0 R>>>> >>"
-        )
-        page_ids.append(page_id)
+    pages_placeholder_id = add_object("<< /Type /Pages /Kids [] /Count 0 >>")
     font_id = add_object("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
 
-    # Rebuild pages object with correct kid refs
+    content_ids = []
+    for page in pages:
+        content_id = add_object(
+            f"<< /Length {len(page.encode('latin1'))} >>\nstream\n{page}\nendstream"
+        )
+        content_ids.append(content_id)
+
+    page_ids = []
+    for content_id in content_ids:
+        page_id = add_object(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] /Contents {content_id} 0 R /Resources <</Font <</F1 {font_id} 0 R>>>> >>"
+        )
+        page_ids.append(page_id)
+
     pages_obj = f"<< /Type /Pages /Kids [{' '.join(f'{pid} 0 R' for pid in page_ids)}] /Count {len(page_ids)} >>"
-    objects[1] = pages_obj
+    objects[pages_placeholder_id - 1] = pages_obj
 
     xref_offset = 0
     body = []
