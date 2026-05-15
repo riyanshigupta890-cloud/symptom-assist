@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from groq import AsyncGroq
+from groq import AsyncGroq, GroqError
 from dotenv import load_dotenv
 import logging
 import textwrap
@@ -63,7 +63,18 @@ RAG = RAGPipeline(csv_path=_DOCS_CSV)
 logging.info("[startup] Loading NLP extractor (dynamic lexicon from CSV)...")
 NLP = SymptomExtractor(csv_path=_SYMPTOM_CSV)
 logging.info("[startup] Groq client ready.")
-GROQ = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
+GROQ = None  # Lazy initialization: will be created on first use
+
+
+def _get_groq_client():
+    """Return or create the Groq client on demand."""
+    global GROQ
+    if GROQ is None:
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise GroqError("GROQ_API_KEY not set")
+        GROQ = AsyncGroq(api_key=api_key)
+    return GROQ
 
 # ---------------------------------------------------------------------------
 # Server-side session store: sessionId -> { symptoms: list[dict], last_active: datetime }
@@ -411,7 +422,8 @@ async def call_groq_api(messages: list, model: str = "llama-3.1-8b-instant") -> 
         # Mock responder for testing without a real API key
         return "I have received your symptom report. Based on our analysis, we have updated your clinical summary. You can now view it by clicking the 'SUMMARY' button at the top of the page."
 
-    chat_completion = await GROQ.chat.completions.create(
+    groq_client = _get_groq_client()
+    chat_completion = await groq_client.chat.completions.create(
         model=model,
         messages=messages,
         max_tokens=1000,
