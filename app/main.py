@@ -19,6 +19,7 @@ import os
 import json
 import uuid
 import pathlib
+import unicodedata
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from groq import AsyncGroq
+from groq import AsyncGroq, GroqError
 from dotenv import load_dotenv
 import logging
 import textwrap
@@ -62,7 +63,18 @@ RAG = RAGPipeline(csv_path=_DOCS_CSV)
 logging.info("[startup] Loading NLP extractor (dynamic lexicon from CSV)...")
 NLP = SymptomExtractor(csv_path=_SYMPTOM_CSV)
 logging.info("[startup] Groq client ready.")
-GROQ = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
+GROQ = None  # Lazy initialization: will be created on first use
+
+
+def _get_groq_client():
+    """Return or create the Groq client on demand."""
+    global GROQ
+    if GROQ is None:
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise GroqError("GROQ_API_KEY not set")
+        GROQ = AsyncGroq(api_key=api_key)
+    return GROQ
 
 # ---------------------------------------------------------------------------
 # Server-side session store: sessionId -> { symptoms: list[dict], last_active: datetime }
@@ -298,7 +310,11 @@ def build_clinical_summary_text(
 
 
 def _escape_pdf_text(text: str) -> str:
-    return text.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+    text = text.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+    text = text.replace('•', '-').replace('–', '-').replace('—', '-')
+    text = text.replace('“', '"').replace('”', '"').replace('’', "'").replace('‘', "'")
+    text = unicodedata.normalize('NFKD', text)
+    return ''.join(ch for ch in text if ord(ch) < 256)
 
 
 def _build_pdf_pages(lines: list[str], page_width: int = 595, page_height: int = 842, margin_left: int = 40, margin_top: int = 40, line_height: int = 14):
@@ -319,34 +335,41 @@ def _build_pdf_pages(lines: list[str], page_width: int = 595, page_height: int =
 
 
 def build_pdf_bytes(text: str) -> bytes:
+    page_width = 595
+    page_height = 842
+
     lines = []
     for raw_line in text.splitlines():
         wrapped = textwrap.wrap(raw_line, width=90) or [""]
         lines.extend(wrapped)
-    pages = _build_pdf_pages(lines)
+    pages = _build_pdf_pages(lines, page_width=page_width, page_height=page_height)
 
     objects = []
     def add_object(content: str) -> int:
         objects.append(content)
         return len(objects)
 
+    # Pre-calculate object IDs for stable references
     catalog_id = add_object("<< /Type /Catalog /Pages 2 0 R >>")
-    pages_id = add_object("<< /Type /Pages /Kids [3 0 R] /Count {} >>".format(len(pages)))
-    page_ids = []
-    content_ids = []
-    for page in pages:
-        content_id = add_object(f"<< /Length {len(page.encode('latin1'))} >>\nstream\n{page}\nendstream")
-        content_ids.append(content_id)
-    for content_id in content_ids:
-        page_id = add_object(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] /Contents {content_id} 0 R /Resources <</Font <</F1 5 0 R>>>> >>"
-        )
-        page_ids.append(page_id)
+    pages_placeholder_id = add_object("<< /Type /Pages /Kids [] /Count 0 >>")
     font_id = add_object("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
 
-    # Rebuild pages object with correct kid refs
+    content_ids = []
+    for page in pages:
+        content_id = add_object(
+            f"<< /Length {len(page.encode('latin1'))} >>\nstream\n{page}\nendstream"
+        )
+        content_ids.append(content_id)
+
+    page_ids = []
+    for content_id in content_ids:
+        page_id = add_object(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] /Contents {content_id} 0 R /Resources <</Font <</F1 {font_id} 0 R>>>> >>"
+        )
+        page_ids.append(page_id)
+
     pages_obj = f"<< /Type /Pages /Kids [{' '.join(f'{pid} 0 R' for pid in page_ids)}] /Count {len(page_ids)} >>"
-    objects[1] = pages_obj
+    objects[pages_placeholder_id - 1] = pages_obj
 
     xref_offset = 0
     body = []
@@ -399,7 +422,8 @@ async def call_groq_api(messages: list, model: str = "llama-3.1-8b-instant") -> 
         # Mock responder for testing without a real API key
         return "I have received your symptom report. Based on our analysis, we have updated your clinical summary. You can now view it by clicking the 'SUMMARY' button at the top of the page."
 
-    chat_completion = await GROQ.chat.completions.create(
+    groq_client = _get_groq_client()
+    chat_completion = await groq_client.chat.completions.create(
         model=model,
         messages=messages,
         max_tokens=1000,
