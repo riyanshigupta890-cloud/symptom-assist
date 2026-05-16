@@ -32,15 +32,22 @@ from dotenv import load_dotenv
 import logging
 import textwrap
 
-from .core.error_handler import APIErrorHandler, retry_with_backoff
-from .logging_config import setup_logging
+import sys
+import pathlib
 
-from .core.knowledge_graph import (
+# Ensure the root project directory is in sys.path so 'app' can be imported
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+from app.core.error_handler import APIErrorHandler, retry_with_backoff
+from app.core.semantic_cache import SemanticCache
+from app.logging_config import setup_logging
+
+from app.core.knowledge_graph import (
     load_graph_from_csv, traverse_graph, find_candidate_conditions,
     get_followup_questions, get_treatment, check_red_flags, graph_summary
 )
-from .core.rag_pipeline import RAGPipeline
-from .core.nlp_extractor import SymptomExtractor
+from app.core.rag_pipeline import RAGPipeline
+from app.core.nlp_extractor import SymptomExtractor
 
 load_dotenv(override=True)
 setup_logging(log_dir="logs", level=logging.INFO)
@@ -64,6 +71,17 @@ logging.info("[startup] Loading NLP extractor (dynamic lexicon from CSV)...")
 NLP = SymptomExtractor(csv_path=_SYMPTOM_CSV)
 logging.info("[startup] Groq client ready.")
 GROQ = None  # Lazy initialization: will be created on first use
+
+# ---------------------------------------------------------------------------
+# Semantic Cache — shares the sentence-transformer model with RAG to save RAM
+# ---------------------------------------------------------------------------
+logging.info("[startup] Initialising semantic cache...")
+SEMANTIC_CACHE = SemanticCache(
+    model=RAG.retriever.model,                                      # reuse model
+    similarity_threshold=float(os.getenv("CACHE_SIMILARITY_THRESHOLD", "0.92")),
+    ttl_seconds=int(os.getenv("CACHE_TTL_SECONDS", "3600")),
+    max_entries=int(os.getenv("CACHE_MAX_ENTRIES", "500")),
+)
 
 
 def _get_groq_client():
@@ -582,22 +600,34 @@ async def chat(request: ChatRequest):
             has_noise=bool(extraction.noise),
         )
 
-        # --- Step 6: Call Groq with full context ---
-        # Map roles to Groq roles ("user" -> "user", "model" -> "assistant")
-        messages = [{"role": "system", "content": system_prompt}]
-        for m in request.messages:
-            role = "user" if m.role == "user" else "assistant"
-            messages.append({"role": role, "content": m.content})
+        # --- Step 6: Check semantic cache, then call Groq if needed ---
+        cached_reply = SEMANTIC_CACHE.get(latest_user_msg, all_symptom_names)
+        cache_hit = cached_reply is not None
 
-        try:
-            reply = await call_groq_api(messages)
+        if cache_hit:
+            reply = cached_reply
             if noise_message:
                 reply = f"{noise_message}\n\n{reply}"
-        except Exception as e:
-            # Log full error for debugging
-            APIErrorHandler.log_error(e, "Groq API call failed in /chat endpoint")
-            # Get user-friendly message
-            reply = APIErrorHandler.get_user_message(e)
+            logging.info("[/chat] Served from semantic cache — Groq call skipped")
+        else:
+            # Cache miss — build messages and call Groq
+            # Map roles to Groq roles ("user" -> "user", "model" -> "assistant")
+            messages = [{"role": "system", "content": system_prompt}]
+            for m in request.messages:
+                role = "user" if m.role == "user" else "assistant"
+                messages.append({"role": role, "content": m.content})
+
+            try:
+                reply = await call_groq_api(messages)
+                # Store in cache before adding noise prefix
+                SEMANTIC_CACHE.put(latest_user_msg, all_symptom_names, reply)
+                if noise_message:
+                    reply = f"{noise_message}\n\n{reply}"
+            except Exception as e:
+                # Log full error for debugging
+                APIErrorHandler.log_error(e, "Groq API call failed in /chat endpoint")
+                # Get user-friendly message
+                reply = APIErrorHandler.get_user_message(e)
 
         return ChatResponse(
             reply=reply,
@@ -628,7 +658,28 @@ async def clear_session(body: dict):
     """Clears the symptom timeline for a given session (used by 'New Chat')."""
     session_id = body.get("session_id")
     if session_id and session_id in SESSION_STORE:
+        # Invalidate any cached replies tied to this session's symptom context
+        symptom_names = [s["name"] for s in SESSION_STORE[session_id].get("symptoms", [])]
+        if symptom_names:
+            SEMANTIC_CACHE.invalidate_context(symptom_names)
         del SESSION_STORE[session_id]
+    return {"cleared": True}
+
+
+# ---------------------------------------------------------------------------
+# Cache observability endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/cache/stats")
+async def cache_stats():
+    """Return semantic cache hit/miss statistics."""
+    return SEMANTIC_CACHE.stats()
+
+
+@app.post("/cache/clear")
+async def cache_clear():
+    """Manually wipe the entire semantic cache."""
+    SEMANTIC_CACHE.clear()
     return {"cleared": True}
 
 
