@@ -888,7 +888,6 @@
         isLoading = true;
 
         sendBtn.disabled = true;
-        sendBtn.textContent = "Sending...";
 
         addMessage("user", text);
         history.push({ role: "user", content: text });
@@ -928,7 +927,6 @@
 
         isLoading = false;
 
-        sendBtn.textContent = "Send";
         sendBtn.disabled = inputEl.value.trim() === "";
 
         inputEl.focus();
@@ -1081,7 +1079,6 @@
         const copySummaryBtn = document.getElementById("copySummaryBtn");
         const downloadPdfBtn = document.getElementById("downloadPdfBtn");
         const printSummaryBtn = document.getElementById("printSummaryBtn");
-        const downloadPdfBtn = document.getElementById("downloadPdfBtn");
         const summaryTextArea = document.getElementById("summary-text-area");
         let lastSummaryData = null;
 
