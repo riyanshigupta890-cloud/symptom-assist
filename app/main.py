@@ -127,6 +127,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = Field(None, max_length=100)
     extracted_symptoms: Optional[List[str]] = Field([], max_length=30)
     temporal_context: Optional[List[SymptomDetail]] = Field([], max_length=30)
+    deep_research: bool = Field(False)
 
 class ChatResponse(BaseModel):
     reply: str
@@ -401,11 +402,17 @@ async def chat(request: ChatRequest):
         journey_edges = build_journey_edges(all_symptoms_data, candidates)
 
         # --- Step 4: RAG retrieval ---
-        rag_context = RAG.retrieve_context(latest_user_msg, top_k=2)
-        rag_sources = [
-            doc["title"]
-            for doc in RAG.retrieve_raw(latest_user_msg, top_k=2)
-        ]
+        if request.deep_research and candidates:
+            condition_name = candidates[0]["display"]
+            rag_docs = RAG.retrieve_pubmed_raw(condition_name, latest_user_msg, top_k=2)
+            # If PubMed returns nothing, graceful fallback to CSV
+            if not rag_docs:
+                rag_docs = RAG.retrieve_raw(latest_user_msg, top_k=2)
+        else:
+            rag_docs = RAG.retrieve_raw(latest_user_msg, top_k=2)
+
+        rag_sources = [doc["title"] for doc in rag_docs]
+        rag_context = "\n\n---\n\n".join([f"[{doc['title']}]\n{doc['content']}" for doc in rag_docs])
 
         # --- Step 5: Build enriched system prompt ---
         system_prompt = build_system_prompt(

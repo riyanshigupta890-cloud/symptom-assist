@@ -19,6 +19,7 @@ import math
 import os
 import re
 from collections import defaultdict
+from .pubmed_retriever import PubMedRetriever
 
 
 # ---------------------------------------------------------------------------
@@ -53,9 +54,12 @@ def load_documents_from_csv(csv_path: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 class SemanticRetriever:
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        from sentence_transformers import SentenceTransformer
-        self.model = SentenceTransformer(model_name)
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2", model=None):
+        if model:
+            self.model = model
+        else:
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer(model_name)
         self.chunks = []
         self.chunk_embeddings = None
 
@@ -162,6 +166,34 @@ class RAGPipeline:
 
         self.retriever = SemanticRetriever()
         self.retriever.index(documents)
+        self.pubmed = PubMedRetriever()
+
+    def retrieve_pubmed_raw(self, condition: str, query: str, top_k: int = 3) -> list[dict]:
+        """Fetch from PubMed, dynamically embed, and return top chunks with scores."""
+        abstracts = self.pubmed.retrieve(condition, max_results=5)
+        if not abstracts:
+            return []
+            
+        docs = []
+        for a in abstracts:
+            docs.append({
+                "id": f"pubmed_{a['pmid']}",
+                "condition": condition,
+                "title": f"{a['title']} [PMID: {a['pmid']}, {a['year']}]",
+                "content": a['abstract']
+            })
+            
+        temp_retriever = SemanticRetriever(model=self.retriever.model)
+        temp_retriever.index(docs, chunk_size=400, overlap=50)
+        return temp_retriever.retrieve(query, top_k=top_k)
+
+    def retrieve_pubmed_context(self, condition: str, query: str, top_k: int = 3) -> str:
+        """Return formatted context string from PubMed for the LLM prompt."""
+        docs = self.retrieve_pubmed_raw(condition, query, top_k=top_k)
+        if not docs:
+            return ""
+        parts = [f"[{doc['title']}]\n{doc['content']}" for doc in docs]
+        return "\n\n---\n\n".join(parts)
 
     def retrieve_context(self, query: str, top_k: int = 3) -> str:
         """Return formatted context string for the LLM prompt."""
