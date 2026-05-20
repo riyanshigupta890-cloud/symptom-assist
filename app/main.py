@@ -868,6 +868,10 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 def index():
     return FileResponse("static/index.html")
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "version": "2.0"}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
