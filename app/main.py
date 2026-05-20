@@ -648,7 +648,10 @@ async def chat(request: ChatRequest):
         logging.error("CRITICAL ERROR IN /chat ENDPOINT:")
         logging.error(err_msg)
         APIErrorHandler.log_error(overall_e, "Critical error in /chat endpoint")
-        with open("error_log.txt", "w", encoding="utf-8") as f:
+        logs_path = _PROJECT_ROOT / "logs"
+        logs_path.mkdir(parents=True, exist_ok=True)
+        error_log_path = logs_path / "error.log"
+        with open(error_log_path, "w", encoding="utf-8") as f:
             f.write(err_msg)
         raise HTTPException(status_code=500, detail=APIErrorHandler.get_user_message(overall_e)) from overall_e
 
