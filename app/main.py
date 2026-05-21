@@ -156,6 +156,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = Field(None, max_length=100)
     extracted_symptoms: Optional[List[str]] = Field([], max_length=30)
     temporal_context: Optional[List[SymptomDetail]] = Field([], max_length=30)
+    deep_research: bool = Field(False)
 
 class ChatResponse(BaseModel):
     reply: str
@@ -169,6 +170,18 @@ class ChatResponse(BaseModel):
     red_flags_detected: List[str]
     traversal_path: List[dict] = []
     journey_edges: List[dict] = []
+
+class AudioInputRequest(BaseModel):
+    audio_base64: str = Field(..., description="Base64 encoded audio string")
+    mime_type: Optional[str] = Field("audio/webm", description="MIME type of the audio file")
+
+class VisionInputRequest(BaseModel):
+    image_base64: str = Field(..., description="Base64 encoded image string")
+    mime_type: Optional[str] = Field("image/jpeg", description="MIME type of the image file")
+
+class PreProcessingResponse(BaseModel):
+    extracted_text: str
+    status: str = "success"
 
 class GraphNode(BaseModel):
     id: str
@@ -589,11 +602,17 @@ async def chat(request: ChatRequest):
         journey_edges = build_journey_edges(all_symptoms_data, candidates)
 
         # --- Step 4: RAG retrieval ---
-        rag_context = RAG.retrieve_context(latest_user_msg, top_k=2)
-        rag_sources = [
-            doc["title"]
-            for doc in RAG.retrieve_raw(latest_user_msg, top_k=2)
-        ]
+        if request.deep_research and candidates:
+            condition_name = candidates[0]["display"]
+            rag_docs = RAG.retrieve_pubmed_raw(condition_name, latest_user_msg, top_k=2)
+            # If PubMed returns nothing, graceful fallback to CSV
+            if not rag_docs:
+                rag_docs = RAG.retrieve_raw(latest_user_msg, top_k=2)
+        else:
+            rag_docs = RAG.retrieve_raw(latest_user_msg, top_k=2)
+
+        rag_sources = [doc["title"] for doc in rag_docs]
+        rag_context = "\n\n---\n\n".join([f"[{doc['title']}]\n{doc['content']}" for doc in rag_docs])
 
         # --- Step 5: Build enriched system prompt ---
         system_prompt = build_system_prompt(
@@ -864,6 +883,82 @@ async def get_graph_data():
         ))
 
     return GraphData(nodes=nodes, edges=edges)
+
+
+# ---------------------------------------------------------------------------
+# Multimodal Input Pre-processing Layer
+# ---------------------------------------------------------------------------
+
+@app.post("/input/audio", response_model=PreProcessingResponse)
+async def process_audio_input(request: AudioInputRequest):
+    """
+    Pre-processes an audio symptom description (Speech-to-Text).
+    Converts speech into structured clinical text to be fed into the existing pipeline.
+    """
+    try:
+        b64_str = request.audio_base64
+        if "," in b64_str:
+            b64_str = b64_str.split(",", 1)[1]
+            
+        audio_bytes = base64.b64decode(b64_str)
+        ext = "webm" if "webm" in request.mime_type else "wav"
+        
+        # Call Groq Whisper API
+        transcription = GROQ.audio.transcriptions.create(
+            file=(f"audio.{ext}", audio_bytes, request.mime_type),
+            model="whisper-large-v3-turbo",
+            response_format="json",
+            language="en",
+        )
+        text = transcription.text.strip()
+        if not text:
+            raise ValueError("Audio transcription returned empty text.")
+            
+        return PreProcessingResponse(extracted_text=text)
+    except Exception as e:
+        APIErrorHandler.log_error(e, "Audio pre-processing failed in /input/audio")
+        # Provide graceful error feedback
+        raise HTTPException(status_code=500, detail=f"Audio transcription failed: {str(e)}")
+
+
+@app.post("/input/vision", response_model=PreProcessingResponse)
+async def process_vision_input(request: VisionInputRequest):
+    """
+    Pre-processes a visual symptom image (Vision AI).
+    Extracts structured clinical descriptions from images before entering the pipeline.
+    """
+    try:
+        b64_str = request.image_base64
+        if "," in b64_str:
+            b64_str = b64_str.split(",", 1)[1]
+            
+        image_url = f"data:{request.mime_type};base64,{b64_str}"
+        
+        prompt = (
+            "Analyze this image of a patient's physical symptom. Extract and describe the visible clinical signs "
+            "(e.g., rash, swelling, erythema, lesions, inflammation, discoloration) in clear, structured clinical text "
+            "that can be processed by a symptom extraction pipeline. Be concise and focus purely on the visual symptoms present."
+        )
+        
+        completion = GROQ.chat.completions.create(
+            model="llama-3.2-11b-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                }
+            ],
+            max_tokens=300,
+            temperature=0.2,
+        )
+        extracted = completion.choices[0].message.content.strip()
+        return PreProcessingResponse(extracted_text=extracted)
+    except Exception as e:
+        APIErrorHandler.log_error(e, "Vision pre-processing failed in /input/vision")
+        raise HTTPException(status_code=500, detail=f"Vision analysis failed: {str(e)}")
 
 
 # ---------------------------------------------------------------------------
