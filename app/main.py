@@ -32,6 +32,9 @@ from dotenv import load_dotenv
 import logging
 import textwrap
 
+from .core.prompts import SYSTEM_PROMPT_TEMPLATE
+from .core.error_handler import APIErrorHandler, retry_with_backoff
+from .logging_config import setup_logging
 import sys
 import pathlib
 
@@ -201,6 +204,8 @@ def build_system_prompt(
     red_flags,
     has_noise=False,
 ) -> str:
+
+    base = SYSTEM_PROMPT_TEMPLATE
 
     base = """You are SymptomAssist, a compassionate AI health assistant.
 You have access to a medical knowledge graph and retrieved medical documents to inform your responses.
