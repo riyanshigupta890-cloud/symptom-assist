@@ -24,5 +24,11 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
           
+          # Verify token exists to prevent silent credential failures
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::HF_TOKEN secret is not set in GitHub repository secrets. Please configure it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          
           git remote add hf https://tanishq06:$HF_TOKEN@huggingface.co/spaces/tanishq06/symptom-assist-ai
-          git push hf main --force
+          git push hf HEAD:main --force
