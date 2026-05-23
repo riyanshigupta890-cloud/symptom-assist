@@ -1,4 +1,15 @@
+---
+title: SymptomAssist AI
+emoji: 🩺
+colorFrom: teal
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # SymptomAssist AI 🩺
+
 
 SymptomAssist AI is a neuro-symbolic medical assistant that combines:
 
