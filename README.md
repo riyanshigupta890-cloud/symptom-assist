@@ -1,8 +1,8 @@
 ---
 title: SymptomAssist AI
 emoji: 🩺
-colorFrom: teal
-colorTo: indigo
+colorFrom: indigo
+colorTo: blue
 sdk: docker
 app_port: 7860
 pinned: false
