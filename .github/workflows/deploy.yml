@@ -24,7 +24,5 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
           
-          # Add the Hugging Face Spaces remote and push
-          # Replace 'YOUR_HF_USERNAME' and 'YOUR_SPACE_NAME' with your actual details
-          git remote add hf https://huggingface.co/spaces/tanishq06/symptom-assist-ai
+          git remote add hf https://tanishq06:$HF_TOKEN@huggingface.co/spaces/tanishq06/symptom-assist-ai
           git push hf main --force
