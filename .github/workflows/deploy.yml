@@ -16,19 +16,37 @@ jobs:
           fetch-depth: 0
           lfs: true
 
-      - name: Push to Hugging Face
+      - name: Clean and Push to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # Configure Git credentials
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "github-actions[bot]"
-          
-          # Verify token exists to prevent silent credential failures
+          # 1. Verify token exists
           if [ -z "$HF_TOKEN" ]; then
             echo "::error::HF_TOKEN secret is not set in GitHub repository secrets. Please configure it under Settings -> Secrets and variables -> Actions."
             exit 1
           fi
           
+          # 2. Create a clean deployment folder (excluding binaries)
+          mkdir -p /tmp/deploy
+          cp -rp . /tmp/deploy/
+          
+          # Remove Git history and binary/dev-db directories
+          cd /tmp/deploy
+          rm -rf .git
+          rm -rf assets
+          rm -rf screenshots
+          rm -rf data/chroma_db
+          
+          # 3. Initialize a clean git repository for Hugging Face
+          git init
+          git checkout -b main
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          
+          # 4. Commit clean files
+          git add .
+          git commit -m "Clean deployment build"
+          
+          # 5. Push to Hugging Face Space
           git remote add hf https://tanishq06:$HF_TOKEN@huggingface.co/spaces/tanishq06/symptom-assist-ai
-          git push hf HEAD:main --force
+          git push hf main --force
