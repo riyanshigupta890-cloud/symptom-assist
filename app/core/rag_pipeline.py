@@ -1,3 +1,5 @@
+import json
+import hashlib
 """
 rag_pipeline.py
 ---------------
