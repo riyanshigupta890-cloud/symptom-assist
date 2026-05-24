@@ -796,7 +796,7 @@
                 <div class="condition-item">
                   <div class="condition-header">
                     <span class="condition-name">${c.display}</span>
-                    <span class="severity sev-${c.severity}">${c.severity}</span>
+
                   </div>
 
                   <div class="conf-badge ${badgeClass}">
