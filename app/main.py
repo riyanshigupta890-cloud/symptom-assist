@@ -16,6 +16,7 @@ Dataset-driven: conditions, symptoms, and documents all come from
 """
 
 import os
+import base64
 import json
 import uuid
 import pathlib
