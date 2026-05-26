@@ -1,16 +1,18 @@
+import json
+import hashlib
 """
 rag_pipeline.py
 ---------------
 RAG (Retrieval-Augmented Generation) pipeline for the symptom chatbot.
 
 Medical documents are now loaded from data/medical_docs.csv instead of
-being hardcoded. The TF-IDF retrieval engine is unchanged.
+being hardcoded. The semantic engine uses sentence-transformers for retrieval.
 
 Flow:
   1. Load medical documents from CSV at startup
-  2. Build TF-IDF index
+  2. Build semantic index using pre-trained embeddings
   3. At query time, embed the user's symptom description
-  4. Retrieve top-k most relevant document chunks
+  4. Retrieve top-k most relevant document chunks via cosine similarity
   5. Return chunks as context to inject into the LLM prompt
 """
 
@@ -19,7 +21,7 @@ import math
 import os
 import re
 from collections import defaultdict
-
+from .pubmed_retriever import PubMedRetriever 
 
 # ---------------------------------------------------------------------------
 # 1. CSV Loader
@@ -36,12 +38,12 @@ def load_documents_from_csv(csv_path: str) -> list[dict]:
     documents: list[dict] = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        for row in reader:
+        for i, row in enumerate(reader):
             documents.append({
-                "id":        f"doc_{row['condition'].strip()}",
+                "id":        f"doc_{row['condition'].strip()}_{i}",
                 "condition": row["condition"].strip(),
-                "title":     row["title"].strip(),
-                "content":   row["content"].strip(),
+                "title": (row.get("title") or "").strip(),
+                "content": (row.get("content") or "").strip(),
             })
 
     print(f"[RAG] Loaded {len(documents)} medical documents from CSV")
@@ -49,99 +51,173 @@ def load_documents_from_csv(csv_path: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 2. TF-IDF vectoriser
+# 2. Semantic vectoriser
 # ---------------------------------------------------------------------------
 
-class TFIDFRetriever:
-    def __init__(self):
-        self.documents   = []
-        self.vocab       = {}
-        self.idf         = {}
-        self.tfidf_matrix = []
+class SemanticRetriever:
+    def __init__(
+        self,
+        model_name: str = "all-MiniLM-L6-v2",
+        db_path: str = None,
+        model=None
+    ):
+        from sentence_transformers import SentenceTransformer
+        import chromadb
+        import pathlib
+        
+        if model is not None:
+            self.model = model
+        else:
+            self.model = SentenceTransformer(model_name)
+        
+        if db_path is None:
+            _here = pathlib.Path(__file__).parent.parent.parent
+            db_path = str(_here / "data" / "chroma_db")
+            
+        os.makedirs(db_path, exist_ok=True)
+        self.chroma_client = chromadb.PersistentClient(path=db_path)
+        self.collection = self.chroma_client.get_or_create_collection(name="medical_docs")
 
-    def _tokenize(self, text: str) -> list[str]:
-        text = text.lower()
-        text = re.sub(r"[^a-z0-9\s]", " ", text)
-        tokens = text.split()
-        stopwords = {
-            "the","a","an","is","are","was","were","be","been","being",
-            "have","has","had","do","does","did","will","would","could",
-            "should","may","might","shall","can","need","dare","ought",
-            "used","to","of","in","on","at","by","for","with","about",
-            "against","between","through","during","before","after",
-            "above","below","from","up","down","out","off","over","under",
-            "again","then","once","and","but","or","nor","so","yet",
-            "both","either","neither","not","no","nor","only","own",
-            "same","than","too","very","it","its","this","that","these",
-            "those","which","who","whom","what","when","where","why","how"
-        }
-        return [t for t in tokens if t not in stopwords and len(t) > 2]
+    def _chunk_text(self, text: str, chunk_size: int = 400, overlap: int = 50) -> list[str]:
+        """
+        Split text into chunks of roughly `chunk_size` words with `overlap` words.
+        Using words as a proxy for tokens.
+        """
+        words = text.split()
+        if not words:
+            return []
+        
+        chunks = []
+        for i in range(0, len(words), chunk_size - overlap):
+            chunk = " ".join(words[i : i + chunk_size])
+            chunks.append(chunk)
+            # If we've reached the end of the text, stop
+            if i + chunk_size >= len(words):
+                break
+        return chunks
 
-    def _tf(self, tokens: list[str]) -> dict:
-        tf: dict[str, int] = defaultdict(int)
-        for t in tokens:
-            tf[t] += 1
-        total = len(tokens) if tokens else 1
-        return {k: v / total for k, v in tf.items()}
+    def index(self, documents: list[dict], chunk_size: int = 400, overlap: int = 50):
+        """
+        Processes documents by splitting them into chunks and embedding each chunk.
+        Uses ChromaDB for persistence and vector storage.
+        """
+        csv_hash = hashlib.md5(
+            json.dumps([d["id"] for d in documents], sort_keys=True).encode()
+        ).hexdigest()
 
-    def index(self, documents: list[dict]):
-        self.documents = documents
-        tokenized = [self._tokenize(d["content"] + " " + d["title"]) for d in documents]
+        stored_hash = (self.collection.metadata or {}).get("csv_hash")
 
-        all_terms = set(t for doc in tokenized for t in doc)
-        self.vocab = {term: i for i, term in enumerate(sorted(all_terms))}
+        if self.collection.count() > 0 and stored_hash == csv_hash:
+            print(f"[RAG] ChromaDB up to date ({self.collection.count()} chunks). Skipping indexing.")
+            return
+        elif self.collection.count() > 0:
+            print("[RAG] CSV changed — rebuilding index...")
+            self.chroma_client.delete_collection("medical_docs")
+            self.collection = self.chroma_client.get_or_create_collection(
+                name="medical_docs",
+                metadata={"csv_hash": csv_hash}
+            )
 
-        N = len(documents)
-        df: dict[str, int] = defaultdict(int)
-        for doc_tokens in tokenized:
-            for term in set(doc_tokens):
-                df[term] += 1
-        self.idf = {
-            term: math.log((N + 1) / (df[term] + 1)) + 1
-            for term in self.vocab
-        }
+        ids = []
+        texts_to_embed = []
+        metadatas = []
+        seen_ids = set()
 
-        self.tfidf_matrix = []
-        for doc_tokens in tokenized:
-            tf = self._tf(doc_tokens)
-            vec = {
-                term: tf.get(term, 0) * self.idf.get(term, 0)
-                for term in self.vocab
-            }
-            self.tfidf_matrix.append(vec)
+        for doc in documents:
+            content = doc.get("content", "")
+            title = doc.get("title", "")
+            
+            # Split the document into overlapping chunks
+            doc_chunks = self._chunk_text(content, chunk_size, overlap)
+            
+            for i, chunk_text in enumerate(doc_chunks):
+                chunk_id = f"{doc['id']}_chunk_{i}"
+                
+                # Deduplicate within this batch
+                if chunk_id in seen_ids:
+                    continue
+                seen_ids.add(chunk_id)
+                
+                # We need to embed title + content for better semantic matching
+                embed_text = f"{title}: {chunk_text}"
+                
+                ids.append(chunk_id)
+                texts_to_embed.append(embed_text)
+                
+                metadatas.append({
+                    "original_id": doc["id"],
+                    "condition": doc["condition"],
+                    "title": title,
+                    "content": chunk_text
+                })
 
-        print(f"[RAG] Indexed {len(documents)} documents, vocab size: {len(self.vocab)}")
-
-    def _cosine_similarity(self, vec_a: dict, vec_b: dict) -> float:
-        common = set(vec_a.keys()) & set(vec_b.keys())
-        dot    = sum(vec_a[k] * vec_b[k] for k in common)
-        norm_a = math.sqrt(sum(v**2 for v in vec_a.values()))
-        norm_b = math.sqrt(sum(v**2 for v in vec_b.values()))
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        return dot / (norm_a * norm_b)
+        if texts_to_embed:
+            print(f"[RAG] Generating embeddings for {len(texts_to_embed)} chunks...")
+            embeddings = self.model.encode(texts_to_embed).tolist()
+            
+            print(f"[RAG] Inserting {len(texts_to_embed)} chunks into ChromaDB...")
+            self.collection.add(
+                ids=ids,
+                embeddings=embeddings,
+                metadatas=metadatas,
+                documents=texts_to_embed
+            )
+            print("[RAG] Indexing complete.")
+        else:
+            print("[RAG] No texts to index.")
 
     def retrieve(self, query: str, top_k: int = 3) -> list[dict]:
-        query_tokens = self._tokenize(query)
-        query_tf     = self._tf(query_tokens)
-        query_vec    = {
-            term: query_tf.get(term, 0) * self.idf.get(term, 0)
-            for term in self.vocab
-        }
+        if self.collection.count() == 0:
+            return []
 
-        scores = []
-        for i, doc_vec in enumerate(self.tfidf_matrix):
-            score = self._cosine_similarity(query_vec, doc_vec)
-            scores.append((score, i))
-
-        scores.sort(reverse=True)
-        results = []
-        for score, idx in scores[:top_k]:
-            if score > 0:
-                doc = self.documents[idx].copy()
-                doc["relevance_score"] = round(score, 4)
-                results.append(doc)
-        return results
+        # Encode the query
+        query_embedding = self.model.encode(query).tolist()
+        
+        # Query ChromaDB (fetch more than top_k to account for deduplication)
+        fetch_k = top_k * 3
+        results = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=fetch_k,
+            include=["metadatas", "distances"]
+        )
+        
+        if not results["ids"] or not results["ids"][0]:
+            return []
+            
+        final_results = []
+        seen_docs = set()
+        
+        # ChromaDB returns a list of lists since we can query multiple vectors at once
+        ids = results["ids"][0]
+        metadatas = results["metadatas"][0]
+        distances = results["distances"][0]
+        
+        for i in range(len(ids)):
+            if len(final_results) >= top_k:
+                break
+                
+            # Convert ChromaDB's distance to a similarity score (rough proxy)
+            # Assuming distance is a metric where lower is better.
+            dist = distances[i]
+            score = max(0.0, 1.0 - (dist / 2.0))
+            
+            meta = metadatas[i]
+            doc_id = meta["original_id"]
+            
+            # Deduplication
+            if doc_id not in seen_docs:
+                chunk_data = {
+                    "id": ids[i],
+                    "original_id": doc_id,
+                    "condition": meta["condition"],
+                    "title": meta["title"],
+                    "content": meta["content"],
+                    "relevance_score": round(score, 4)
+                }
+                final_results.append(chunk_data)
+                seen_docs.add(doc_id)
+                
+        return final_results
 
 
 # ---------------------------------------------------------------------------
@@ -157,14 +233,49 @@ class RAGPipeline:
             documents = []
             print("[RAG] WARNING: no medical_docs.csv found; RAG context will be empty.")
 
-        self.retriever = TFIDFRetriever()
+        self.retriever = SemanticRetriever()
         self.retriever.index(documents)
+        self.pubmed = PubMedRetriever()
 
-    def retrieve_context(self, query: str, top_k: int = 3) -> str:
-        """Return formatted context string for the LLM prompt."""
+    def retrieve_pubmed_raw(self, condition: str, query: str, top_k: int = 3) -> list[dict]:
+        """Fetch from PubMed, dynamically embed, and return top chunks with scores."""
+        abstracts = self.pubmed.retrieve(condition, max_results=5)
+        if not abstracts:
+            return []
+            
+        docs = []
+        for a in abstracts:
+            docs.append({
+                "id": f"pubmed_{a['pmid']}",
+                "condition": condition,
+                "title": f"{a['title']} [PMID: {a['pmid']}, {a['year']}]",
+                "content": a['abstract']
+            })
+            
+        temp_retriever = SemanticRetriever(model=self.retriever.model)
+        temp_retriever.index(docs, chunk_size=400, overlap=50)
+        return temp_retriever.retrieve(query, top_k=top_k)
+
+    def retrieve_pubmed_context(self, condition: str, query: str, top_k: int = 3) -> str:
+        """Return formatted context string from PubMed for the LLM prompt."""
+        docs = self.retrieve_pubmed_raw(condition, query, top_k=top_k)
+        if not docs:
+            return ""
+        parts = [f"[{doc['title']}]\n{doc['content']}" for doc in docs]
+        return "\n\n---\n\n".join(parts)
+
+    def retrieve_context(self, query: str, top_k: int = 3, min_score: float = 0.3) -> str:
+        """
+        Return formatted context string for the LLM prompt.
+        """
         docs = self.retriever.retrieve(query, top_k=top_k)
         if not docs:
             return ""
+        
+        docs = [doc for doc in docs if doc["relevance_score"] >= min_score]
+        if not docs:
+            return ""
+        
         parts = [f"[{doc['title']}]\n{doc['content']}" for doc in docs]
         return "\n\n---\n\n".join(parts)
 
@@ -190,4 +301,4 @@ if __name__ == "__main__":
     ]:
         print(f"\nQuery: '{q}'")
         for r in rag.retrieve_raw(q, top_k=2):
-            print(f"  → {r['title']} (score: {r['relevance_score']})")
+            print(f"  -> {r['title']} (score: {r['relevance_score']})")
