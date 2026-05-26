@@ -17,8 +17,13 @@ import re
 import csv
 import os
 from typing import NamedTuple
-import spacy
-
+try:
+    import spacy
+    nlp = spacy.load("en_core_web_sm")
+    SPACY_AVAILABLE = True
+except:
+    SPACY_AVAILABLE = False
+    nlp = None
 try:
     from rapidfuzz import process as fuzz_process, fuzz
     _FUZZY_AVAILABLE = True
