@@ -38,8 +38,6 @@ FUZZY_THRESHOLD = 92
 # 1. Synonym generator — turns dataset symptom names into lexicon entries
 # ---------------------------------------------------------------------------
 
-# Hand-authored synonym expansions for common medical terms.
-# These supplements the auto-generated variants from the CSV column names.
 _MANUAL_SYNONYMS: dict[str, list[str]] = {
     "headache":               ["headache", "head ache", "head pain", "head hurts", "head is pounding",
                                "head is throbbing", "head hurting", "my head hurts", "cephalgia"],
@@ -112,7 +110,6 @@ _MANUAL_SYNONYMS: dict[str, list[str]] = {
     "watery eyes":            ["watery eyes", "eyes watering", "tearing", "tears"],
     "blurred vision":         ["blurred vision", "blurry vision", "vision blurred", "fuzzy vision"],
     "thirst":                 ["thirsty", "thirst", "very thirsty", "drinking lots", "increased thirst"],
-
     "weight loss":            ["losing weight", "weight loss", "lost weight unintentionally", "unexplained weight loss"],
     "weight gain":            ["weight gain", "gaining weight", "putting on weight"],
     "trembling":              ["trembling", "shaking", "tremor", "hands shaking", "shaky"],
@@ -141,45 +138,14 @@ _MANUAL_SYNONYMS: dict[str, list[str]] = {
 
 
 def _auto_synonyms(canonical: str) -> list[str]:
-    """
-    Generate simple variants of a canonical symptom string.
-
-    Includes basic normalization such as:
-    - replacing underscores with spaces
-    - handling simple plural forms
-
-    Args:
-        canonical (str): Base symptom string.
-
-    Returns:
-        list[str]: Generated synonym variants.
-    """
-
     variants = {canonical}
-    # Replace underscores if present
     variants.add(canonical.replace("_", " "))
-    # Strip trailing 's'
     if canonical.endswith("s") and len(canonical) > 3:
         variants.add(canonical[:-1])
     return list(variants)
 
 
 def build_lexicon_from_csv(csv_path: str) -> dict[str, list[str]]:
-    """
-    Build a symptom lexicon from a CSV dataset.
-
-    Extracts symptom columns and maps each canonical symptom
-    to a list of phrase variants, combining manual and auto-generated synonyms.
-
-    Args:
-        csv_path (str): Path to the dataset file.
-
-    Returns:
-        dict[str, list[str]]: Mapping of canonical symptoms to phrases.
-
-    Raises:
-        FileNotFoundError: If the dataset file does not exist.
-    """
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Dataset not found: {csv_path}")
 
@@ -194,16 +160,13 @@ def build_lexicon_from_csv(csv_path: str) -> dict[str, list[str]]:
 
     lexicon: dict[str, list[str]] = {}
 
-    # Start from manual synonyms (authoritative)
     for canonical, phrases in _MANUAL_SYNONYMS.items():
         lexicon[canonical] = list(dict.fromkeys(p.lower() for p in phrases))
 
-    # Add CSV-derived symptoms not already in the manual list
     for sym in canonical_symptoms:
         if sym not in lexicon:
             lexicon[sym] = _auto_synonyms(sym)
         else:
-            # Merge: ensure the canonical form itself is a phrase in the list
             if sym not in lexicon[sym]:
                 lexicon[sym].insert(0, sym)
 
@@ -211,56 +174,32 @@ def build_lexicon_from_csv(csv_path: str) -> dict[str, list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# 2. Extractor class (same interface as before)
+# 2. Extractor class
 # ---------------------------------------------------------------------------
 
 class ExtractionResult(NamedTuple):
-    """
-    Represents the result of symptom extraction.
-
-    Attributes:
-        symptoms (list): List of detected canonical symptom names.
-        raw_mentions (list): List of original matched phrases from input text.
-        negated (list): List of symptoms that were negated in the input.
-    """
-    symptoms:    list   # canonical symptom names found
-    raw_mentions: list  # original phrases from user text
-    negated:     list   # symptoms mentioned but negated ("no fever")
+    symptoms:    list
+    raw_mentions: list
+    negated:     list
     noise: list
 
 
 class SymptomExtractor:
     def __init__(self, csv_path: str | None = None):
-        """
-        Initializes the SymptomExtractor.
-
-        Builds the symptom lexicon either from a CSV file or fallback manual synonyms.
-        Also prepares lookup structures and loads NLP model.
-
-        Args:
-            csv_path (str | None): Optional path to the dataset CSV file.
-
-        Returns:
-            None
-        """
-        # Build lexicon from CSV if path provided; fall back to manual synonyms
         if csv_path and os.path.exists(csv_path):
             lexicon = build_lexicon_from_csv(csv_path)
         else:
             lexicon = {k: list(dict.fromkeys(v)) for k, v in _MANUAL_SYNONYMS.items()}
 
-        # Reverse lookup: phrase → canonical
         self.phrase_to_symptom: dict[str, str] = {}
         for canonical, phrases in lexicon.items():
             for phrase in phrases:
                 self.phrase_to_symptom[phrase.lower()] = canonical
 
-        # Sort by length descending (longer phrases matched first)
         self.sorted_phrases = sorted(
             self.phrase_to_symptom.keys(), key=len, reverse=True
         )
 
-        # Pre-build a flat list of all phrases for fuzzy candidate lookup
         self._all_phrases: list[str] = list(self.phrase_to_symptom.keys())
 
         self.negation_patterns = re.compile(
@@ -269,56 +208,36 @@ class SymptomExtractor:
             re.IGNORECASE
         )
 
-        # Initialize spaCy for dependency-based negation parsing
         if SPACY_AVAILABLE:
             try:
-                 self.nlp = spacy.load("en_core_web_sm")
-              except OSError:
-                      self.nlp = None
+                self.nlp = spacy.load("en_core_web_sm")
+            except OSError:
+                self.nlp = None
         else:
-             self.nlp= None
+            self.nlp = None
+
         print(f"[NLP] Lexicon loaded: {len(lexicon)} canonical symptoms, "
               f"{len(self.phrase_to_symptom)} total phrases")
 
     def _is_negated(self, doc, start_char: int, end_char: int) -> bool:
-        """
-        Checks whether a detected symptom is negated in the sentence.
-
-        Uses dependency parsing to determine if negation words are associated
-        with the symptom.
-
-        Args:
-            doc (spacy.tokens.Doc): spaCy processed document.
-            start_char (int): Start index of the symptom in text.
-            end_char (int): End index of the symptom in text.
-
-        Returns:
-            bool: True if the symptom is negated, otherwise False.
-        """
         if not doc:
             return False
 
-        # Find tokens that overlap with the character range [start_char, end_char)
         symptom_tokens = [t for t in doc if t.idx >= start_char and t.idx < end_char]
         if not symptom_tokens:
-            # Fallback for tokens that might start slightly before start_char (e.g. whitespace)
             symptom_tokens = [t for t in doc if t.idx + len(t.text) > start_char and t.idx < end_char]
 
         negation_words = {"no", "not", "without", "never", "deny", "denies", "absence", "negative"}
 
         for token in symptom_tokens:
-            # 1. Direct children negation (e.g., "no fever")
             if any(child.dep_ == "neg" or child.lemma_.lower() in negation_words for child in token.children):
                 return True
-            
-            # 2. Check ancestors (e.g., "denies pain" or "don't HAVE headache")
+
             curr = token
             while curr != curr.head:
                 curr = curr.head
-                # Check if the ancestor itself is a negation word (e.g. "DENIES pain")
                 if curr.lemma_.lower() in negation_words:
                     return True
-                # If the ancestor has a negation child (e.g. "don't HAVE headache")
                 if any(child.dep_ == "neg" or child.lemma_.lower() in negation_words for child in curr.children):
                     return True
                 if curr.pos_ == "VERB":
@@ -327,16 +246,6 @@ class SymptomExtractor:
         return False
 
     def _fuzzy_match_token(self, token: str) -> tuple[str, str] | None:
-        """
-        Attempts to fuzzy match a token or phrase against known symptom phrases.
-
-        Args:
-            token (str): Input token or phrase.
-
-        Returns:
-            tuple[str, str] | None: Matched phrase and canonical symptom,
-            or None if no match is found.
-        """
         if not _FUZZY_AVAILABLE or len(token) < 3:
             return None
         result = fuzz_process.extractOne(
@@ -351,23 +260,6 @@ class SymptomExtractor:
         return matched_phrase, self.phrase_to_symptom[matched_phrase]
 
     def extract(self, text: str) -> ExtractionResult:
-        """
-        Extracts symptoms from input text.
-
-        Performs exact matching, negation detection, and fuzzy matching
-        to identify symptoms mentioned by the user.
-
-        Args:
-            text (str): User input text describing symptoms.
-
-        Returns:
-            ExtractionResult: Contains detected symptoms, raw mentions,
-            and negated symptoms.
-
-        Example:
-            >>> extractor.extract("I have fever but no cough")
-            ExtractionResult(symptoms=["fever"], raw_mentions=["fever"], negated=["cough"])
-        """
         text_lower = text.lower()
         doc = self.nlp(text) if self.nlp else None
 
@@ -400,13 +292,8 @@ class SymptomExtractor:
 
                 start = idx + 1
 
-        # ── Fuzzy fallback pass ──────────────────────────────────────────
-        # Tokenize the text into word n-grams (1–3 words) that weren't
-        # already covered by exact matching, then fuzzy-match each against
-        # the full phrase lexicon.
         if _FUZZY_AVAILABLE:
             words = re.findall(r"[a-z']+", text_lower)
-            # Generate trigrams → bigrams → unigrams (longest wins)
             candidates: list[tuple[int, str]] = []
             for n in (3, 2, 1):
                 for i in range(len(words) - n + 1):
@@ -416,7 +303,7 @@ class SymptomExtractor:
                         continue
                     positions = set(range(approx_pos, approx_pos + len(ngram)))
                     if positions & matched_positions:
-                        continue  # already matched exactly
+                        continue
                     candidates.append((approx_pos, ngram))
 
             seen_positions: set[int] = set()
@@ -440,8 +327,7 @@ class SymptomExtractor:
                 else:
                     if canonical not in found_symptoms:
                         found_symptoms.append(canonical)
-        # 🔥 Filter: keep only symptoms that actually relate to input words
-        cleaned_symptoms = []
+
         STOPWORDS = {"and", "or", "the", "a", "i", "have", "has", "had"}
 
         input_words = set(
@@ -450,29 +336,27 @@ class SymptomExtractor:
         )
 
         cleaned_symptoms = []
-
         for symptom in found_symptoms:
             symptom_words = set(symptom.split())
-
-    # allow fuzzy overlap OR phrase match OR manual mapping
             if symptom_words & input_words or len(symptom_words) == 1:
                 cleaned_symptoms.append(symptom)
-                
+
         original_words = set(re.findall(r"[a-z']+", text_lower))
         matched_words = set()
         for phrase in raw_mentions:
             matched_words.update(phrase.lower().split())
 
         noise_words = [
-            word for word in (original_words-matched_words)
-            if word not in STOPWORDS and len(word) >3
+            word for word in (original_words - matched_words)
+            if word not in STOPWORDS and len(word) > 3
         ]
+
         found_symptoms = cleaned_symptoms
         return ExtractionResult(
-            symptoms = found_symptoms,
-            raw_mentions = raw_mentions,
-            negated = negated_symptoms,
-            noise = list(noise_words)   # 👈 ADD THIS
+            symptoms=found_symptoms,
+            raw_mentions=raw_mentions,
+            negated=negated_symptoms,
+            noise=list(noise_words)
         )
 
 
@@ -486,7 +370,7 @@ if __name__ == "__main__":
     csv_p = str(_here / "data" / "symptom_disease.csv")
 
     extractor = SymptomExtractor(csv_path=csv_p)
-    
+
     print("\n" + "="*40)
     print("      SYMPTOM EXTRACTION TESTER")
     print("="*40)
@@ -498,14 +382,14 @@ if __name__ == "__main__":
             if not t or t.lower() in ["quit", "exit", "q"]:
                 print("Exiting...")
                 break
-                
+
             r = extractor.extract(t)
             print(f"  [Found]:   {r.symptoms}")
             if r.negated:
                 print(f"  [Negated]: {r.negated}")
             if not r.symptoms and not r.negated:
                 print("  [Result]:  No symptoms detected.")
-                
+
         except KeyboardInterrupt:
             print("\nExiting...")
             break
