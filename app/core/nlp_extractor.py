@@ -270,10 +270,12 @@ class SymptomExtractor:
         )
 
         # Initialize spaCy for dependency-based negation parsing
-        try:
-            self.nlp = spacy.load("en_core_web_sm")
-        except OSError:
-            print("[NLP] Model 'en_core_web_sm' not found. Please run 'python -m spacy download en_core_web_sm'")
+       if SPACY_AVAILABLE:
+            try:
+                self.nlp = spacy.load("en_core_web_sm")
+            except OSError:
+                self.nlp = None
+        else:
             self.nlp = None
 
         print(f"[NLP] Lexicon loaded: {len(lexicon)} canonical symptoms, "
