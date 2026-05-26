@@ -81,7 +81,7 @@ GROQ = None  # Lazy initialization: will be created on first use
 # ---------------------------------------------------------------------------
 logging.info("[startup] Initialising semantic cache...")
 SEMANTIC_CACHE = SemanticCache(
-    model=RAG.retriever.model,                                      # reuse model
+    model=getattr(RAG.retriever, "model", None),                                      # reuse model
     similarity_threshold=float(os.getenv("CACHE_SIMILARITY_THRESHOLD", "0.92")),
     ttl_seconds=int(os.getenv("CACHE_TTL_SECONDS", "3600")),
     max_entries=int(os.getenv("CACHE_MAX_ENTRIES", "500")),
