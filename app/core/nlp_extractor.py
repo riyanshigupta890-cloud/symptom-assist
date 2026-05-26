@@ -177,6 +177,13 @@ def build_lexicon_from_csv(csv_path: str) -> dict[str, list[str]]:
 # 2. Extractor class
 # ---------------------------------------------------------------------------
 
+class SymptomTimelineEntry(TypedDict):
+    symptom:  str
+    severity: str
+    onset:    str
+    order:    int
+
+
 class ExtractionResult(NamedTuple):
     symptoms:    list
     raw_mentions: list
@@ -254,10 +261,6 @@ class SymptomExtractor:
             scorer=fuzz.WRatio,
             score_cutoff=FUZZY_THRESHOLD,
         )
-        if result is None:
-            return None
-        matched_phrase, score, _ = result
-        return matched_phrase, self.phrase_to_symptom[matched_phrase]
 
     def extract(self, text: str) -> ExtractionResult:
         text_lower = text.lower()
