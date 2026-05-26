@@ -176,7 +176,7 @@ class ChatResponse(BaseModel):
     session_id: str                         # client must echo this on the next turn
     extracted_symptoms: List[str]
     symptom_timeline: List[str] = []
-    temporal_context: List[SymptomDetail] = [] # New: returned to frontend
+    structured_timeline: List[dict] = []  # Detailed temporal format
     top_conditions: List[dict]
     rag_sources: List[str]
     graph_followups: List[str]
@@ -665,11 +665,19 @@ async def chat(request: Request, chat_request: ChatRequest):
 
         return ChatResponse(
             reply=reply,
-            session_id=session_id,
-            extracted_symptoms=all_symptom_names,
-            symptom_timeline=all_symptom_names,
-            temporal_context=[SymptomDetail(**s) for s in all_symptoms_data],
-            top_conditions=top_condition,
+            extracted_symptoms=all_symptoms,
+            symptom_timeline=all_symptoms,
+            structured_timeline=extraction.timeline,
+            top_conditions=[
+                {
+                    "display":       c["display"],
+                    "score":         c["score"],
+                    "severity":      c["severity"],
+                    "condition_id":  c["condition_id"],
+                    "traversal_path": c.get("traversal_path", []),
+                }
+                for c in candidates[:3]
+            ],
             rag_sources=rag_sources,
             graph_followups=followup_questions[:4],
             red_flags_detected=red_flags,
@@ -805,7 +813,8 @@ async def get_summary_pdf(session_id: str):
 @limiter.limit("5/minute")
 async def debug_analyse(request: Request, body: dict):
     text = body.get("text", "")
-    extraction = NLP.extract(text)
+    # Try LLM extraction first for debug info
+    extraction = NLP.llm_extract(GROQ, text)
     candidates = traverse_graph(GRAPH, extraction.symptoms)
     rag_docs   = RAG.retrieve_raw(text, top_k=3)
     red_flags  = check_red_flags(GRAPH, extraction.symptoms)
@@ -814,6 +823,7 @@ async def debug_analyse(request: Request, body: dict):
         "input":                  text,
         "nlp_extracted_symptoms": extraction.symptoms,
         "nlp_negated_symptoms":   extraction.negated,
+        "nlp_timeline":           extraction.timeline,
         "graph_candidates": [
             {
                 "condition":  c["display"],
