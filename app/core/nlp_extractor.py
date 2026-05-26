@@ -270,14 +270,13 @@ class SymptomExtractor:
         )
 
         # Initialize spaCy for dependency-based negation parsing
-       if SPACY_AVAILABLE:
+        if SPACY_AVAILABLE:
             try:
-                self.nlp = spacy.load("en_core_web_sm")
-            except OSError:
-                self.nlp = None
+                 self.nlp = spacy.load("en_core_web_sm")
+              except OSError:
+                      self.nlp = None
         else:
-            self.nlp = None
-
+             self.nlp= None
         print(f"[NLP] Lexicon loaded: {len(lexicon)} canonical symptoms, "
               f"{len(self.phrase_to_symptom)} total phrases")
 
