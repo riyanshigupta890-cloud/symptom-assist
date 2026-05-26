@@ -122,3 +122,7 @@ Optional static checks in repository artifacts:
 This project is for educational and research assistance only.
 It does not provide medical diagnosis or treatment.
 In emergencies, contact local emergency services immediately.
+
+## 🚀 Live Demo
+👉 [symptom-assist.onrender.com](https://symptom-assist.onrender.com)
+
