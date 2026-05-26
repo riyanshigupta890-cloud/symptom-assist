@@ -16,7 +16,8 @@ Pipeline:
 import re
 import csv
 import os
-from typing import NamedTuple
+import json
+from typing import NamedTuple, Optional, TypedDict, List
 
 
 # ---------------------------------------------------------------------------
@@ -180,10 +181,18 @@ def build_lexicon_from_csv(csv_path: str) -> dict[str, list[str]]:
 # 2. Extractor class (same interface as before)
 # ---------------------------------------------------------------------------
 
+class SymptomTimelineEntry(TypedDict):
+    symptom:  str
+    severity: str
+    onset:    str
+    order:    int
+
+
 class ExtractionResult(NamedTuple):
-    symptoms:    list   # canonical symptom names found
+    symptoms:     list   # canonical symptom names found
     raw_mentions: list  # original phrases from user text
-    negated:     list   # symptoms mentioned but negated ("no fever")
+    negated:      list   # symptoms mentioned but negated ("no fever")
+    timeline:     List[SymptomTimelineEntry] = []
 
 
 class SymptomExtractor:
@@ -193,6 +202,8 @@ class SymptomExtractor:
             lexicon = build_lexicon_from_csv(csv_path)
         else:
             lexicon = {k: list(dict.fromkeys(v)) for k, v in _MANUAL_SYNONYMS.items()}
+
+        self.canonical_symptoms = sorted(list(lexicon.keys()))
 
         # Reverse lookup: phrase → canonical
         self.phrase_to_symptom: dict[str, str] = {}
@@ -213,6 +224,100 @@ class SymptomExtractor:
 
         print(f"[NLP] Lexicon loaded: {len(lexicon)} canonical symptoms, "
               f"{len(self.phrase_to_symptom)} total phrases")
+
+    def llm_extract(self, groq_client, text: str) -> ExtractionResult:
+        """
+        Use Groq to extract structured symptoms, severity, and onset.
+        Matches extracted symptoms against the canonical lexicon.
+        """
+        prompt = f"""Extract medical symptoms from the following user text.
+For each symptom, identify:
+1. The symptom name (map it to the closest match from the provided CANONICAL LIST if possible)
+2. Severity (e.g., mild, severe, "really hurting")
+3. Onset/Context (e.g., "when bending down", "started yesterday")
+4. Order of appearance in the conversation or temporal order (1, 2, 3...)
+
+CANONICAL LIST:
+{", ".join(self.canonical_symptoms[:100])} ... (and others)
+
+USER TEXT:
+"{text}"
+
+Return ONLY a JSON object with the following structure:
+{{
+  "extracted": [
+    {{
+      "symptom": "canonical_name",
+      "raw_symptom": "original_text",
+      "severity": "...",
+      "onset": "...",
+      "order": 1,
+      "negated": false
+    }}
+  ]
+}}
+"""
+        try:
+            completion = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": "You are a medical data extraction assistant. Return valid JSON only."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1
+            )
+            data = json.loads(completion.choices[0].message.content)
+            extracted_list = data.get("extracted", [])
+        except Exception as e:
+            print(f"[NLP] LLM Extraction failed: {e}")
+            # Fallback to keyword extraction
+            return self.extract(text)
+
+        found_symptoms:   list[str] = []
+        negated_symptoms: list[str] = []
+        raw_mentions:     list[str] = []
+        timeline:         list[SymptomTimelineEntry] = []
+
+        for item in extracted_list:
+            sym = item.get("symptom", "").lower().strip()
+            # Basic validation/matching against lexicon if LLM hallucinated a non-existent canonical
+            if sym not in self.canonical_symptoms:
+                # Try to find best match in lexicon
+                best_match = None
+                for canon in self.canonical_symptoms:
+                    if canon in sym or sym in canon:
+                        best_match = canon
+                        break
+                if best_match:
+                    sym = best_match
+                else:
+                    # If no match, keep it but it might not hit in the KG
+                    pass
+            
+            if item.get("negated", False):
+                if sym not in negated_symptoms:
+                    negated_symptoms.append(sym)
+            else:
+                if sym not in found_symptoms:
+                    found_symptoms.append(sym)
+                    raw_mentions.append(item.get("raw_symptom", sym))
+                    timeline.append({
+                        "symptom": sym,
+                        "severity": item.get("severity", "unknown"),
+                        "onset": item.get("onset", "unknown"),
+                        "order": item.get("order", 0)
+                    })
+
+        # Ensure timeline is sorted by order
+        timeline.sort(key=lambda x: x["order"])
+
+        return ExtractionResult(
+            symptoms     = found_symptoms,
+            raw_mentions = raw_mentions,
+            negated      = negated_symptoms,
+            timeline     = timeline
+        )
 
     def extract(self, text: str) -> ExtractionResult:
         text_lower = text.lower()

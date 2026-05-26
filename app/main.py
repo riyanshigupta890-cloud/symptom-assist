@@ -86,6 +86,7 @@ class ChatResponse(BaseModel):
     reply: str
     extracted_symptoms: List[str]
     symptom_timeline: List[str] = []
+    structured_timeline: List[dict] = []  # Detailed temporal format
     top_conditions: List[dict]
     rag_sources: List[str]
     graph_followups: List[str]
@@ -228,15 +229,15 @@ async def chat(request: ChatRequest):
             ""
         )
 
-        # --- Step 1: NLP extraction ---
-        extraction = NLP.extract(latest_user_msg)
+        # --- Step 1: NLP extraction (LLM-powered) ---
+        extraction = NLP.llm_extract(GROQ, latest_user_msg)
         all_symptoms = merge_symptom_timeline(
             request.extracted_symptoms or [],
             extraction.symptoms,
         )
 
         # --- Step 2: Red flag check ---
-        red_flags = check_red_flags(GRAPH, all_symptoms + (extraction.symptoms if extraction else []))
+        red_flags = check_red_flags(GRAPH, all_symptoms)
 
         # --- Step 3: BFS graph traversal ---
         candidates = traverse_graph(GRAPH, all_symptoms)
@@ -290,6 +291,7 @@ async def chat(request: ChatRequest):
             reply=reply,
             extracted_symptoms=all_symptoms,
             symptom_timeline=all_symptoms,
+            structured_timeline=extraction.timeline,
             top_conditions=[
                 {
                     "display":       c["display"],
@@ -323,7 +325,8 @@ async def chat(request: ChatRequest):
 @app.post("/debug/analyse")
 async def debug_analyse(body: dict):
     text = body.get("text", "")
-    extraction = NLP.extract(text)
+    # Try LLM extraction first for debug info
+    extraction = NLP.llm_extract(GROQ, text)
     candidates = traverse_graph(GRAPH, extraction.symptoms)
     rag_docs   = RAG.retrieve_raw(text, top_k=3)
     red_flags  = check_red_flags(GRAPH, extraction.symptoms)
@@ -332,6 +335,7 @@ async def debug_analyse(body: dict):
         "input":                  text,
         "nlp_extracted_symptoms": extraction.symptoms,
         "nlp_negated_symptoms":   extraction.negated,
+        "nlp_timeline":           extraction.timeline,
         "graph_candidates": [
             {
                 "condition":  c["display"],
